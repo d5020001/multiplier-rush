@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Multiplier Rush</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+        * { box-sizing: border-box; user-select: none; -webkit-tap-highlight-color: transparent; }
+        body { margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #0f0f1a; color: white; overflow: hidden; height: 100vh; touch-action: none; }
+        #game-container { width: 100%; height: 100vh; position: relative; overflow: hidden; }
+        
+        /* Верхняя панель */
+        #ui { position: absolute; top: 0; left: 0; right: 0; padding: 15px; display: flex; justify-content: space-between; align-items: flex-start; z-index: 10; pointer-events: none; }
+        .score-box { background: rgba(0, 0, 0, 0.6); padding: 8px 15px; border-radius: 15px; border: 2px solid #e94560; font-size: 18px; font-weight: bold; }
+        .score-box span { color: #feca57; }
+        
+        /* Меню прокачек */
+        #shop { position: absolute; top: 70px; left: 10px; right: 10px; display: flex; gap: 10px; z-index: 10; pointer-events: auto; justify-content: center; }
+        .btn-upgrade { background: rgba(255, 255, 255, 0.1); border: 1px solid #555; color: white; padding: 8px 12px; border-radius: 10px; font-size: 12px; display: flex; flex-direction: column; align-items: center; cursor: pointer; backdrop-filter: blur(5px); }
+        .btn-upgrade:active { background: rgba(255, 255, 255, 0.2); }
+        .btn-upgrade .cost { color: #feca57; font-weight: bold; font-size: 14px; }
+        .btn-upgrade.disabled { opacity: 0.5; pointer-events: none; }
+
+        /* Игровые элементы */
+        .circle { position: absolute; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 24px; font-weight: bold; color: #fff; text-shadow: 1px 1px 3px black; will-change: transform; }
+        .circle.good { background: radial-gradient(circle, #00b894, #00cec9); border: 3px solid #55efc4; box-shadow: 0 0 15px #00cec9; }
+        .circle.bomb { background: radial-gradient(circle, #d63031, #e17055); border: 3px solid #ff7675; box-shadow: 0 0 20px #d63031; font-size: 30px; }
+        
+        /* Анимации */
+        @keyframes floatUp { 0% { transform: translateY(0); opacity: 1; } 100% { transform: translateY(-80px); opacity: 0; } }
+        .floating-text { position: absolute; font-size: 20px; font-weight: bold; pointer-events: none; animation: floatUp 0.8s forwards; z-index: 20; }
+        
+        /* Экраны старта и конца */
+        #screen { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(15, 15, 26, 0.95); display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 100; text-align: center; padding: 20px; }
+        h1 { color: #e94560; font-size: 36px; margin-bottom: 10px; text-shadow: 0 0 10px rgba(233, 69, 96, 0.5); }
+        p { color: #ccc; margin-bottom: 25px; font-size: 16px; line-height: 1.5; }
+        .btn-main { padding: 15px 40px; font-size: 20px; font-weight: bold; color: white; background: #e94560; border: none; border-radius: 30px; box-shadow: 0 4px 15px rgba(233, 69, 96, 0.4); cursor: pointer; transition: transform 0.1s; }
+        .btn-main:active { transform: scale(0.95); }
+        .hidden { display: none !important; }
+        
+        /* Эффект пуль */
+        .bullet { position: absolute; width: 10px; height: 10px; background: #feca57; border-radius: 50%; box-shadow: 0 0 10px #feca57; z-index: 5; pointer-events: none; }
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <div id="ui">
+        <div class="score-box">Счет: <span id="score">0</span></div>
+        <div class="score-box">Время: <span id="timer">30</span></div>
+    </div>
+
+    <div id="shop">
+        <button class="btn-upgrade" id="btn-slow" onclick="buyUpgrade('slow')">
+            ⏳ Замедло <span class="cost" id="cost-slow">50</span>
+        </button>
+        <button class="btn-upgrade" id="btn-gun" onclick="buyUpgrade('gun')">
+            🔫 Пушка <span class="cost" id="cost-gun">150</span>
+        </button>
+        <button class="btn-upgrade" id="btn-time" onclick="buyUpgrade('time')">
+            ⏱ +10 сек <span class="cost" id="cost-time">100</span>
+        </button>
+    </div>
+
+    <div id="screen">
+        <h1>Multiplier Rush</h1>
+        <p>Лови шарики, уворачивайся от бомб.<br>Покупай прокачки прямо в игре!</p>
+        <button class="btn-main" onclick="startGame()">Играть</button>
+    </div>
+</div>
+
+<script>
+    // Настройка Telegram
+    const tg = window.Telegram ? window.Telegram.WebApp : null;
+    if (tg) { tg.ready(); tg.expand(); tg.setHeaderColor('#0f0f1a'); }
+
+    // Элементы
+    const container = document.getElementById('game-container');
+    const screen = document.getElementById('screen');
+    const scoreEl = document.getElementById('score');
+    const timerEl = document.getElementById('timer');
+    
+    // Состояние игры
+    let score = 0;
+    let timeLeft = 30;
+    let isPlaying = false;
+    let gameInterval, spawnInterval, gameLoopId;
+    let isSlowMo = false;
+    let hasGun = false;
+    let entities = [];
+    let bullets = [];
+    
+    // Аудио контекст для звуков
+    let audioCtx;
+    function initAudio() {
+        if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    
+    function playSound(type) {
+        if (!audioCtx) return;
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        
+        if (type === 'pop') {
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(800, audioCtx.currentTime);
+            osc.frequency.exponentialRampToValueAtTime(1200, audioCtx.currentTime + 0.1);
+            gain.gain.setValueAtTime(0.5, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.1);
+            osc.start(); osc.stop(audioCtx.currentTime + 0.1);
+        } else if (type === 'boom') {
+            osc.type = 'sawtooth';
+            osc.frequency.setValueAtTime(150, audioCtx.currentTime);
+            osc.frequency.exponentialRampToValueAtTime(50, audioCtx.currentTime + 0.3);
+            gain.gain.setValueAtTime(0.5, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.3);
+            osc.start(); osc.stop(audioCtx.currentTime + 0.3);
+        } else if (type === 'buy') {
+            osc.type = 'triangle';
+            osc.frequency.setValueAtTime(400, audioCtx.currentTime);
+            osc.frequency.setValueAtTime(600, audioCtx.currentTime + 0.1);
+            gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.2);
+            osc.start(); osc.stop(audioCtx.currentTime + 0.2);
+        }
+    }
+
+    function startGame() {
+        initAudio();
+        score = 0;
+        timeLeft = 30;
+        isPlaying = true;
+        isSlowMo = false;
+        hasGun = false;
+        entities.forEach(e => e.el.remove());
+        bullets.forEach(b => b.remove());
+        entities = [];
+        bullets = [];
+        
+        updateUI();
+        screen.classList.add('hidden');
+        
+        clearInterval(gameInterval);
+        gameInterval = setInterval(() => {
+            if (!isPlaying) return;
+            timeLeft--;
+            updateUI();
+            if (timeLeft <= 0) endGame();
+        }, 1000);
+
+        // Игровой цикл (движение)
+        let lastTime = performance.now();
+        function loop(time) {
+            if (!isPlaying) return;
+            const dt = (time - lastTime) / 1000;
+            lastTime = time;
+            
+            // Движение шариков
+            entities.forEach(ent => {
+                let speedMult = isSlowMo ? 0.3 : 1;
+                ent.x += ent.vx * speedMult;
+                ent.y += ent.vy * speedMult;
+                
+                // Отскок от стен
+                if (ent.x <= 0 || ent.x >= window.innerWidth - ent.size) { ent.vx *= -1; ent.x = Math.max(0, Math.min(ent.x, window.innerWidth - ent.size)); }
+                if (ent.y <= 80 || ent.y >= window.innerHeight - ent.size) { ent.vy *= -1; ent.y = Math.max(80, Math.min(ent.y, window.innerHeight - ent.size)); }
+                
+                ent.el.style.transform = `translate(${ent.x}px, ${ent.y}px)`;
+            });
+
+            // Движение пуль
+            if (hasGun && Math.random() < 0.05) { // Скорострельность
+                shootBullet();
+            }
+            
+            for (let i = bullets.length - 1; i >= 0; i--) {
+                let b = bullets[i];
+                b.y -= 15;
+                b.el.style.transform = `translate(${b.x}px, ${b.y}px)`;
+                if (b.y < 0) { b.el.remove(); bullets.splice(i, 1); continue; }
+                
+                // Попадание
+                for (let j = entities.length - 1; j >= 0; j--) {
+                    let ent = entities[j];
+                    if (ent.type === 'good' && Math.hypot(b.x - (ent.x + ent.size/2), b.y - (ent.y + ent.size/2)) < ent.size) {
+                        popEntity(ent, false);
+                        b.el.remove();
+                        bullets.splice(i, 1);
+                        break;
+                    }
+                }
+            }
+            
+            gameLoopId = requestAnimationFrame(loop);
+        }
+        gameLoopId = requestAnimationFrame(loop);
+        
+        // Спавн элементов
+        spawnInterval = setInterval(() => {
+            if (isPlaying) spawnEntity();
+        }, 600); // Каждые 0.6 сек
+    }
+
+    function spawnEntity() {
+        const isBomb = Math.random() < 0.3;
+        const size = 60;
+        const el = document.createElement('div');
+        el.className = `circle ${isBomb ? 'bomb' : 'good'}`;
+        el.style.width = `${size}px`;
+        el.style.height = `${size}px`;
+        el.innerText = isBomb ? '💥' : 'x' + (Math.floor(Math.random() * 4) + 2);
+        
+        // Скорость увеличивается со временем
+        let baseSpeed = 1.5 + (30 - timeLeft) * 0.05;
+        const angle = Math.random() * Math.PI * 2;
+        
+        const ent = {
+            el: el,
+            type: isBomb ? 'bomb' : 'good',
+            x: Math.random() * (window.innerWidth - size),
+            y: Math.random() * (window.innerHeight - size - 100) + 100,
+            vx: Math.cos(angle) * baseSpeed,
+            vy: Math.sin(angle) * baseSpeed,
+            size: size,
+            value: isBomb ? 0 : parseInt(el.innerText.replace('x', '')) * 10
+        };
+        
+        if (ent.vx === 0) ent.vx = 1;
+        if (ent.vy === 0) ent.vy = 1;
+        
+        el.style.transform = `translate(${ent.x}px, ${ent.y}px)`;
+        
+        el.addEventListener('touchstart', (e) => { e.preventDefault(); handleTap(ent); }, {passive: false});
+        el.addEventListener('mousedown', (e) => { e.preventDefault(); handleTap(ent); });
+        
+        container.appendChild(el);
+        entities.push(ent);
+    }
+
+    function handleTap(ent) {
+        if (!isPlaying) return;
+        if (ent.type === 'good') {
+            popEntity(ent, true);
+            if (tg && tg.HapticFeedback) tg.HapticFeedback.impactOccurred('light');
+        } else {
+            // Взрыв бомбы
+            playSound('boom');
+            timeLeft = Math.max(0, timeLeft - 5);
+            showFloatingText('-5 сек', ent.x, ent.y, '#ff7675');
+            if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('error');
+            updateUI();
+            if (timeLeft <= 0) endGame();
+            removeEntity(ent);
+        }
+    }
+
+    function popEntity(ent, addScore) {
+        playSound('pop');
+        if (addScore) {
+            score += ent.value;
+            showFloatingText(`+${ent.value}`, ent.x, ent.y, '#55efc4');
+            updateUI();
+        }
+        removeEntity(ent);
+    }
+
+    function removeEntity(ent) {
+        const index = entities.indexOf(ent);
+        if (index > -1) {
+            ent.el.remove();
+            entities.splice(index, 1);
+        }
+    }
+
+    function showFloatingText(text, x, y, color) {
+        const el = document.createElement('div');
+        el.className = 'floating-text';
+        el.innerText = text;
+        el.style.color = color;
+        el.style.left = x + 'px';
+        el.style.top = y + 'px';
+        container.appendChild(el);
+        setTimeout(() => el.remove(), 800);
+    }
+
+    function updateUI() {
+        scoreEl.innerText = score;
+        timerEl.innerText = timeLeft;
+        
+        // Обновляем состояние кнопок
+        document.getElementById('cost-slow').innerText = isSlowMo ? 'ON' : '50';
+        document.getElementById('cost-gun').innerText = hasGun ? 'ON' : '150';
+        document.getElementById('cost-time').innerText = '100';
+        
+        document.getElementById('btn-slow').classList.toggle('disabled', score < 50 || isSlowMo);
+        document.getElementById('btn-gun').classList.toggle('disabled', score < 150 || hasGun);
+        document.getElementById('btn-time').classList.toggle('disabled', score < 100);
+    }
+
+    // Прокачки
+    function buyUpgrade(type) {
+        if (type === 'slow' && score >= 50 && !isSlowMo) {
+            score -= 50;
+            isSlowMo = true;
+            playSound('buy');
+            if (tg) tg.HapticFeedback.impactOccurred('medium');
+            setTimeout(() => { isSlowMo = false; updateUI(); }, 5000); // 5 сек замедления
+        } else if (type === 'gun' && score >= 150 && !hasGun) {
+            score -= 150;
+            hasGun = true;
+            playSound('buy');
+            if (tg) tg.HapticFeedback.impactOccurred('medium');
+        } else if (type === 'time' && score >= 100) {
+            score -= 100;
+            timeLeft += 10;
+            playSound('buy');
+            if (tg) tg.HapticFeedback.impactOccurred('medium');
+        }
+        updateUI();
+    }
+
+    // Стрельба
+    function shootBullet() {
+        if (entities.length === 0) return;
+        // Ищем ближайшую цель
+        let target = entities.find(e => e.type === 'good');
+        if (!target) return;
+        
+        const bulletEl = document.createElement('div');
+        bulletEl.className = 'bullet';
+        const startX = window.innerWidth / 2;
+        const startY = window.innerHeight;
+        
+        let b = { x: startX, y: startY, el: bulletEl };
+        bulletEl.style.transform = `translate(${b.x}px, ${b.y}px)`;
+        container.appendChild(bulletEl);
+        bullets.push(b);
+    }
+
+    function endGame() {
+        isPlaying = false;
+        clearInterval(gameInterval);
+        clearInterval(spawnInterval);
+        cancelAnimationFrame(gameLoopId);
+        
+        entities.forEach(e => e.el.remove());
+        bullets.forEach(b => b.remove());
+        entities = [];
+        bullets = [];
+        
+        screen.classList.remove('hidden');
+        screen.innerHTML = `
+            <h1 style="color: #e94560;">Игра окончена!</h1>
+            <p style="font-size: 24px; color: white;">Твой счет: <span style="color: #feca57;">${score}</span></p>
+            <button class="btn-main" onclick="startGame()">Играть снова</button>
+        `;
+        if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+    }
+</script>
+</body>
+  </html>
